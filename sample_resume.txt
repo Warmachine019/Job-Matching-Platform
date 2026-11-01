@@ -1,0 +1,5 @@
+DEMO CANDIDATE
+Junior Software Developer
+Skills: Python, FastAPI, PostgreSQL, SQL, Docker, Git, REST API, pandas, data analysis.
+Projects: Built a REST API in Python and FastAPI, used PostgreSQL to store structured data, wrote SQL queries and packaged the application with Docker.
+Education: B.Tech Computer Science.
