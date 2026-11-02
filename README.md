@@ -97,3 +97,41 @@ docker compose up --build
 ```
 
 Your existing Docker database volume is preserved by default. If you want to start with an empty demo database, first back up anything important, then run `docker compose down -v` followed by `docker compose up --build`.
+
+## Research prototype upgrade: ECR-Match
+
+Version 3 adds a research-oriented matching method named **ECR-Match v1 (Explainable Constraint-aware Reciprocal Matching)**. It is a proposed experimental method, not a proven novel or validated hiring model.
+
+### New matching ideas
+- Job posts can distinguish `required_skills` from `preferred_skills`.
+- The scorer reports candidate fit and employer-side requirement satisfaction separately.
+- A harmonic mean combines the two sides to discourage one-sided matches.
+- Missing required skills trigger a transparent score cap of 55/100.
+- Each match includes component-level explanations, matched/missing skills, and skill-gap learning steps.
+- Each missing skill includes a counterfactual estimate of the match score if that skill were added. This is a mathematical what-if estimate, not a guarantee that learning the skill will lead to employment.
+- The scoring function does not accept candidate name/email fields. This is a narrow identity-field exclusion, not a complete fairness audit.
+
+### New research endpoints and tools
+- `GET /research/method` describes the method, weights and limitations.
+- `python -m app.evaluate --output results/evaluation.json` runs a deterministic synthetic benchmark comparing keyword overlap, TF-IDF and ECR-Match.
+- `python -m unittest discover -s tests -v` runs unit tests.
+- `docs/RESEARCH_PROTOCOL.md` contains research questions, hypotheses, baselines, metrics, annotation plan and limitations.
+
+The existing Version 2 database is forward-migrated by adding the `preferred_skills` column at startup. Existing job skills remain treated as required skills. No destructive database reset is needed.
+
+### Important research warning
+The included benchmark is synthetic (80 candidates, 24 jobs, 1,920 pairs). Its labels are generated from simple rules that overlap with the matching features. The results are a software/reproducibility check only, not evidence of real-world superiority. For a defensible paper, create a consented or properly licensed dataset, obtain independent human relevance labels, compare against ablations and baselines, report confidence intervals, and conduct an explanation usability study. Do not claim novelty until a formal literature search establishes the closest prior work.
+
+### Updated job creation API example
+```json
+{
+  "recruiter_id": 1,
+  "title": "Backend Developer",
+  "company": "Example Labs",
+  "location": "Remote",
+  "description": "Build Python APIs and maintain PostgreSQL services.",
+  "required_skills": ["python", "postgresql", "fastapi"],
+  "preferred_skills": ["docker", "aws", "git"],
+  "min_experience": 0
+}
+```
