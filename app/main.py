@@ -5,16 +5,20 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, text
 from pypdf import PdfReader
 from docx import Document
 from .database import Base, engine, get_db
 from .models import Candidate, Recruiter, Skill, Resume, ResumeSkill, JobPosting, JobSkill, Application
-from .matching import extract_skills, match_score
+from .matching import extract_skills
+from .research_matching import score_pair
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # Lightweight forward migration for databases created by Version 2.
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE job_posting ADD COLUMN IF NOT EXISTS preferred_skills TEXT NOT NULL DEFAULT ''"))
     yield
 
 app = FastAPI(title="Job Matching & Recruitment Platform", version="1.0.0", lifespan=lifespan)
@@ -34,6 +38,7 @@ class JobIn(BaseModel):
     location: str = "Remote"
     description: str
     required_skills: list[str] = Field(default_factory=list)
+    preferred_skills: list[str] = Field(default_factory=list)
     min_experience: int = 0
 
 class ApplyIn(BaseModel):
@@ -151,6 +156,7 @@ textarea{min-height:90px;resize:vertical}label{display:block;font-size:12px;colo
 <div><label>Company</label><input name="company" required></div><div><label>Location</label><input name="location" value="Remote"></div>
 <div><label>Minimum experience (years)</label><input name="min_experience" type="number" min="0" value="0"></div>
 <div><label>Required skills (comma separated)</label><input name="required_skills" placeholder="python, sql, fastapi"></div>
+<div><label>Preferred skills (comma separated)</label><input name="preferred_skills" placeholder="docker, aws, git"></div>
 <div class="full"><label>Job description</label><textarea name="description" required placeholder="Describe responsibilities and requirements..."></textarea></div>
 <div class="full"><button>Publish job</button></div></form></div>
 <div class="card span6"><h2>Upload candidate resume</h2><form id="resumeForm">
@@ -202,10 +208,10 @@ async function refreshAll(){
 function applicationRows(a){return table(["ID","Candidate","Position","Match","Status","Update"],a.map(x=>`<tr><td>${x.application_id}</td><td>${esc(x.candidate)}</td><td>${esc(x.job_title)} · ${esc(x.company)}</td><td class="score">${x.match_score}%</td><td><span class="pill">${esc(x.status)}</span></td><td><select aria-label="Update status" onchange="updateStatus(${x.application_id},this.value)"><option value="">Change status…</option>${["Applied","Shortlisted","Interview","Offer","Rejected"].map(s=>`<option>${s}</option>`).join("")}</select></td></tr>`));}
 $("candidateForm").addEventListener("submit",async e=>{e.preventDefault();try{const d=await api("/candidates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(formObject(e.target))});notify(`Candidate created. ID: ${d.candidate_id}`);e.target.reset();refreshAll();}catch(x){notify(x.message,"error");}});
 $("recruiterForm").addEventListener("submit",async e=>{e.preventDefault();try{const d=await api("/recruiters",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(formObject(e.target))});notify(`Recruiter created. ID: ${d.recruiter_id}`);e.target.reset();refreshAll();}catch(x){notify(x.message,"error");}});
-$("jobForm").addEventListener("submit",async e=>{e.preventDefault();try{const f=formObject(e.target);f.recruiter_id=Number(f.recruiter_id);f.min_experience=Number(f.min_experience);f.required_skills=f.required_skills.split(",").map(s=>s.trim()).filter(Boolean);const d=await api("/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(f)});notify(`Job published. ID: ${d.job_id}`);e.target.reset();refreshAll();}catch(x){notify(x.message,"error");}});
+$("jobForm").addEventListener("submit",async e=>{e.preventDefault();try{const f=formObject(e.target);f.recruiter_id=Number(f.recruiter_id);f.min_experience=Number(f.min_experience);f.required_skills=f.required_skills.split(",").map(s=>s.trim()).filter(Boolean);f.preferred_skills=(f.preferred_skills||"").split(",").map(s=>s.trim()).filter(Boolean);const d=await api("/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(f)});notify(`Job published. ID: ${d.job_id}`);e.target.reset();refreshAll();}catch(x){notify(x.message,"error");}});
 $("resumeForm").addEventListener("submit",async e=>{e.preventDefault();try{const f=new FormData(e.target);const id=f.get("candidate_id");const d=await api(`/candidates/${id}/resume`,{method:"POST",body:new FormData(e.target)});$("resumeResult").innerHTML=`<div class="result"><b>Resume processed.</b><p>Extracted skills:</p>${d.extracted_skills.map(s=>`<span class="pill">${esc(s)}</span>`).join(" ")}</div>`;notify("Resume uploaded and parsed.");}catch(x){notify(x.message,"error");}});
-$("candidateMatchForm").addEventListener("submit",async e=>{e.preventDefault();try{const d=await api(`/candidates/${formObject(e.target).candidate_id}/matches`);$("candidateMatches").innerHTML='<div class="result">'+(d.matches.length?d.matches.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--line)"><b>${esc(m.title)} · ${esc(m.company)}</b><div class="score">${m.match_score}% match</div><p>Matched: ${m.matched_skills.map(esc).join(", ")||"None"}</p><p class="muted">Missing: ${m.missing_skills.map(esc).join(", ")||"None"}</p><button class="small" onclick="quickApply(${d.candidate_id},${m.job_id})">Apply</button></div>`).join(""):"No jobs found.")+'</div>';}catch(x){notify(x.message,"error");}});
-$("jobMatchForm").addEventListener("submit",async e=>{e.preventDefault();try{const d=await api(`/jobs/${formObject(e.target).job_id}/candidates`);$("jobMatches").innerHTML='<div class="result">'+(d.candidates.length?d.candidates.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--line)"><b>${esc(m.full_name)}</b><div class="score">${m.match_score}% match</div><p>Matched: ${m.matched_skills.map(esc).join(", ")||"None"}</p><p class="muted">Missing: ${m.missing_skills.map(esc).join(", ")||"None"}</p></div>`).join(""):"No candidates with resumes found.")+'</div>';}catch(x){notify(x.message,"error");}});
+$("candidateMatchForm").addEventListener("submit",async e=>{e.preventDefault();try{const d=await api(`/candidates/${formObject(e.target).candidate_id}/matches`);$("candidateMatches").innerHTML='<div class="result">'+(d.matches.length?d.matches.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--line)"><b>${esc(m.title)} · ${esc(m.company)}</b><div class="score">${m.match_score}% match</div><p>Matched: ${m.matched_skills.map(esc).join(", ")||"None"}</p><p class="muted">Missing: ${m.missing_skills.map(esc).join(", ")||"None"}</p><p class="muted">${(m.explanation||[]).map(esc).join(" ")}</p>${(m.skill_gap_plan||[]).length?`<p><b>Skill-gap what-if:</b> ${(m.skill_gap_plan||[]).map(g=>`${esc(g.skill)}: ${g.projected_match_score_if_added}% if added (+${g.score_delta})`).join(" · ")}</p>`:""}<button class="small" onclick="quickApply(${d.candidate_id},${m.job_id})">Apply</button></div>`).join(""):"No jobs found.")+'</div>';}catch(x){notify(x.message,"error");}});
+$("jobMatchForm").addEventListener("submit",async e=>{e.preventDefault();try{const d=await api(`/jobs/${formObject(e.target).job_id}/candidates`);$("jobMatches").innerHTML='<div class="result">'+(d.candidates.length?d.candidates.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--line)"><b>${esc(m.full_name)}</b><div class="score">${m.match_score}% match</div><p>Matched: ${m.matched_skills.map(esc).join(", ")||"None"}</p><p class="muted">Missing: ${m.missing_skills.map(esc).join(", ")||"None"}</p><p class="muted">${(m.explanation||[]).map(esc).join(" ")}</p>${(m.skill_gap_plan||[]).length?`<p><b>Skill-gap what-if:</b> ${(m.skill_gap_plan||[]).map(g=>`${esc(g.skill)}: ${g.projected_match_score_if_added}% if added (+${g.score_delta})`).join(" · ")}</p>`:""}</div>`).join(""):"No candidates with resumes found.")+'</div>';}catch(x){notify(x.message,"error");}});
 $("applyForm").addEventListener("submit",async e=>{e.preventDefault();try{const f=formObject(e.target);f.candidate_id=Number(f.candidate_id);f.job_id=Number(f.job_id);const d=await api("/applications",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(f)});notify(`Application created. ID: ${d.application_id}`);e.target.reset();refreshAll();}catch(x){notify(x.message,"error");}});
 async function quickApply(candidate_id,job_id){try{const d=await api("/applications",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({candidate_id,job_id})});notify(`Application created. ID: ${d.application_id}`);refreshAll();}catch(x){notify(x.message,"error");}}
 async function updateStatus(id,status){if(!status)return;try{await api(`/applications/${id}/status`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});notify(`Application ${id} updated to ${status}.`);refreshAll();}catch(x){notify(x.message,"error");}}
@@ -242,18 +248,20 @@ def create_job(payload: JobIn, db: Session = Depends(get_db)):
     if not db.get(Recruiter, payload.recruiter_id):
         raise HTTPException(404, "Recruiter not found. Create a recruiter first.")
     obj = JobPosting(recruiter_id=payload.recruiter_id, title=payload.title, company=payload.company,
-                     location=payload.location, description=payload.description, min_experience=payload.min_experience)
+                     location=payload.location, description=payload.description, preferred_skills=",".join(sorted({s.strip().lower() for s in payload.preferred_skills if s.strip()} - {s.strip().lower() for s in payload.required_skills if s.strip()})), min_experience=payload.min_experience)
     db.add(obj); db.flush()
-    skills = set(s.strip().lower() for s in payload.required_skills if s.strip()) | extract_skills(payload.description)
+    skills = {s.strip().lower() for s in payload.required_skills if s.strip()}
+    if not skills:
+        skills = extract_skills(payload.description)
     set_job_skills(db, obj, skills)
     db.commit(); db.refresh(obj)
-    return {"job_id": obj.job_id, "title": obj.title, "required_skills": sorted(skills)}
+    return {"job_id": obj.job_id, "title": obj.title, "required_skills": sorted(skills), "preferred_skills": sorted({s.strip().lower() for s in payload.preferred_skills if s.strip()})}
 
 @app.get("/jobs")
 def list_jobs(db: Session = Depends(get_db)):
     jobs = db.scalars(select(JobPosting).options(joinedload(JobPosting.skills).joinedload(JobSkill.skill)).order_by(desc(JobPosting.created_at))).unique()
     return [{"job_id": j.job_id, "title": j.title, "company": j.company, "location": j.location,
-             "description": j.description, "required_skills": sorted(x.skill.name for x in j.skills)} for j in jobs]
+             "description": j.description, "required_skills": sorted(x.skill.name for x in j.skills), "preferred_skills": sorted(s for s in (j.preferred_skills or "").split(",") if s)} for j in jobs]
 
 @app.post("/candidates/{candidate_id}/resume")
 async def upload_resume(candidate_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -282,12 +290,11 @@ def candidate_match_rows(db: Session, candidate: Candidate):
     jobs = db.scalars(select(JobPosting).options(joinedload(JobPosting.skills).joinedload(JobSkill.skill))).unique().all()
     results = []
     for job in jobs:
-        job_skills = {x.skill.name for x in job.skills}
-        score, text_similarity = match_score(resume.raw_text, job.title + " " + job.description, resume_skills, job_skills)
+        required = {x.skill.name for x in job.skills}
+        preferred = {s.strip().lower() for s in (job.preferred_skills or "").split(",") if s.strip()}
+        scored = score_pair(resume.raw_text, job.title + " " + job.description, resume_skills, required, preferred)
         results.append({"job_id": job.job_id, "title": job.title, "company": job.company, "location": job.location,
-                        "match_score": score, "text_similarity": text_similarity,
-                        "matched_skills": sorted(resume_skills & job_skills),
-                        "missing_skills": sorted(job_skills - resume_skills)})
+                        **scored})
     return sorted(results, key=lambda x: x["match_score"], reverse=True)
 
 @app.get("/candidates/{candidate_id}/matches")
@@ -300,18 +307,17 @@ def candidate_matches(candidate_id: int, db: Session = Depends(get_db)):
 def job_candidates(job_id: int, db: Session = Depends(get_db)):
     job = db.get(JobPosting, job_id)
     if not job: raise HTTPException(404, "Job not found.")
-    job_skills = {x.skill.name for x in db.scalars(select(JobSkill).where(JobSkill.job_id == job_id)).all()
-                  for x in [db.get(Skill, x.skill_id)]}
+    required = {x.skill.name for x in db.scalars(select(JobSkill).where(JobSkill.job_id == job_id)).all()
+                for x in [db.get(Skill, x.skill_id)]}
+    preferred = {s.strip().lower() for s in (job.preferred_skills or "").split(",") if s.strip()}
     candidates = db.scalars(select(Candidate).options(joinedload(Candidate.resumes).joinedload(Resume.skills).joinedload(ResumeSkill.skill))).unique().all()
     results = []
     for c in candidates:
         if not c.resumes: continue
         resume = sorted(c.resumes, key=lambda r: r.resume_id)[-1]
         resume_skills = {x.skill.name for x in resume.skills}
-        score, text_similarity = match_score(resume.raw_text, job.title + " " + job.description, resume_skills, job_skills)
-        results.append({"candidate_id": c.candidate_id, "full_name": c.full_name, "match_score": score,
-                        "text_similarity": text_similarity, "matched_skills": sorted(resume_skills & job_skills),
-                        "missing_skills": sorted(job_skills - resume_skills)})
+        scored = score_pair(resume.raw_text, job.title + " " + job.description, resume_skills, required, preferred)
+        results.append({"candidate_id": c.candidate_id, "full_name": c.full_name, **scored})
     return {"job_id": job_id, "candidates": sorted(results, key=lambda x: x["match_score"], reverse=True)}
 
 @app.post("/applications")
@@ -354,3 +360,15 @@ def analytics(db: Session = Depends(get_db)):
             "applications_by_status": {status: sum(1 for a in apps if a.status == status) for status in sorted(ALLOWED_STATUSES)},
             "applications_by_job": [{"job_id": j.job_id, "title": j.title,
                                      "application_count": sum(1 for a in apps if a.job_id == j.job_id)} for j in jobs]}
+
+
+@app.get("/research/method")
+def research_method():
+    return {
+        "name": "ECR-Match v1: Explainable Constraint-aware Reciprocal Matching",
+        "weights": {"required_skill_coverage": 0.45, "text_similarity": 0.25, "role_similarity": 0.15, "preferred_skill_coverage": 0.15},
+        "reciprocal_aggregation": "harmonic mean of candidate-fit and employer-fit",
+        "constraint_rule": "If any required skill is missing, final score is capped at 55/100.",
+        "outputs": ["component scores", "matched/missing skills", "human-readable explanation", "skill-gap learning steps"],
+        "limitations": ["dictionary-based skill extraction", "TF-IDF is lexical rather than transformer semantics", "role vocabulary is manually curated", "not validated for real hiring decisions"],
+    }

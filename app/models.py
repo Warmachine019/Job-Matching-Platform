@@ -51,6 +51,7 @@ class JobPosting(Base):
     company: Mapped[str] = mapped_column(String(180), nullable=False)
     location: Mapped[str] = mapped_column(String(180), default="Remote")
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    preferred_skills: Mapped[str] = mapped_column(Text, default="")
     min_experience: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     recruiter: Mapped["Recruiter"] = relationship(back_populates="jobs")
