@@ -1,6 +1,6 @@
 # TalentMatch — Job Matching & Recruitment Platform
 
-A runnable academic MVP based on the supplied project presentation: candidate/recruiter portals, resume parsing, job posting, skill extraction, ranked matches, application tracking, and recruiter analytics backed by a normalized PostgreSQL schema.
+An improved, runnable academic MVP based on the supplied project presentation: candidate/recruiter portals, resume parsing, job posting, skill extraction, ranked matches, application tracking, and recruiter analytics backed by a normalized PostgreSQL schema.
 
 ## Quick start (Docker recommended)
 
@@ -72,3 +72,28 @@ uvicorn app.main:app --reload
 ## Limitations and safety
 
 This is a class/demo MVP, not production recruitment software. It has no login/role enforcement, malware scanning, OCR for scanned PDFs, email alerts, or production privacy controls. Do not upload real personal data. The matching score is decision support only; a human should review candidates. Add authentication, authorization, audit logging, retention/deletion controls, bias evaluation and security review before deployment.
+
+
+## Version 2 UI improvements
+
+The homepage now has a responsive workspace with:
+- Overview cards for candidates, recruiters, jobs and applications
+- Candidate and recruiter directories
+- Job board with required skill tags
+- Resume upload with extracted-skill display
+- Candidate-to-job and job-to-candidate match result panels
+- One-click application from a candidate match
+- Application tracker with status updates
+- Inline success/error messages and refreshable dashboard
+
+No frontend build tools are required; the interface is served by FastAPI.
+
+## Updating from an older version
+
+If you use Docker Compose, replace the project files with this version and run:
+
+```powershell
+docker compose up --build
+```
+
+Your existing Docker database volume is preserved by default. If you want to start with an empty demo database, first back up anything important, then run `docker compose down -v` followed by `docker compose up --build`.
